@@ -1,0 +1,11 @@
+{
+  "q_hat": 0.8546,
+  "target_coverage": 0.9,
+  "batch_coverage": [0.939, 0.930, 0.922],
+  "batch_avg_set_size": [1.617, 1.696, 2.284],
+  "tolerances": {
+    "q_hat": 0.05,
+    "coverage": 0.03,
+    "avg_set_size": 0.3
+  }
+}

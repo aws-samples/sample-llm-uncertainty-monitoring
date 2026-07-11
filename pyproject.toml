@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-uncertainty-monitoring"
+version = "0.1.0"
+description = "AWS-native split conformal prediction for LLM classification with CloudWatch monitoring and human review routing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT-0" }
+authors = [
+    { name = "Thomas Bonnier", email = "tbonnier@amazon.fr" },
+]
+keywords = ["conformal-prediction", "llm", "uncertainty", "aws", "sagemaker", "monitoring"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT No Attribution License (MIT-0)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://code.aws.dev/personal_projects/alias_t/tbonnier/llm_uncertainty_monitoring_system"
+
+[project.scripts]
+llmum-prepare-data = "scripts.prepare_data:main"
+llmum-deploy-model = "scripts.deploy_model:main"
+llmum-run-calibration-job = "scripts.run_calibration_job:main"
+llmum-deploy-inference-lambda = "scripts.deploy_inference_lambda:main"
+llmum-run-batch-evaluation = "scripts.run_batch_evaluation:main"
+llmum-schedule-batch-evaluation = "scripts.schedule_batch_evaluation:main"
+llmum-explain-uncertainty = "scripts.explain_uncertainty:main"
+llmum-smoke-end-to-end = "scripts.smoke_end_to_end:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", "build", "dist", "examples", "blog", ".kiro"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "W",   # pycodestyle warnings
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]  # asserts in tests are fine
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312", "py313"]
+extend-exclude = "/(\\.venv|build|dist|examples|blog|\\.kiro)/"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = "sagemaker.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+module = "pydeequ.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+module = "pyspark.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

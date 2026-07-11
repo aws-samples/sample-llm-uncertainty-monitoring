@@ -1,0 +1,7 @@
+# Minimal dependencies for Lambda deployment (inference + reviewer handlers).
+# boto3/botocore are pre-installed in the Lambda runtime — do NOT include them.
+# The inference handler uses Boto3Predictor (calls sagemaker-runtime directly)
+# instead of the sagemaker SDK, eliminating all sagemaker transitive deps.
+# This keeps the ZIP small and avoids cross-platform compilation issues.
+numpy>=2.1,<3.0
+scipy>=1.14,<2.0

@@ -1,0 +1,689 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  LLM Uncertainty Monitoring System — infrastructure stack.
+  Deploys IAM roles, DynamoDB config table, S3 buckets, SQS queue, SNS topic,
+  Lambda functions, and EventBridge schedule for conformal-prediction-based
+  LLM uncertainty monitoring. The SageMaker endpoint is deployed separately
+  via scripts/deploy_model.py (JumpStart EULA acceptance required).
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Prefix:
+    Type: String
+    Default: LLMUncertainty
+    Description: Naming prefix for all resources.
+
+  ConfigTableName:
+    Type: String
+    Default: LLMUncertaintyConfig
+    Description: DynamoDB table name for pipeline configuration.
+
+  CloudWatchNamespace:
+    Type: String
+    Default: LLMUncertainty
+    Description: CloudWatch custom namespace for monitoring metrics.
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: >
+      S3 bucket containing the Lambda deployment ZIP. Created by
+      scripts/package_lambda.py before stack deployment.
+
+  LambdaCodeS3Key:
+    Type: String
+    Default: lambda-deployments/llm-uncertainty-lambda.zip
+    Description: S3 key for the Lambda deployment ZIP.
+
+  LambdaRuntime:
+    Type: String
+    Default: python3.10
+    AllowedValues: [python3.10, python3.11, python3.12]
+    Description: Python runtime for Lambda functions.
+
+  InferenceLambdaMemory:
+    Type: Number
+    Default: 1024
+    Description: Memory (MB) for the inference Lambda.
+
+  InferenceLambdaTimeout:
+    Type: Number
+    Default: 120
+    Description: Timeout (seconds) for the inference Lambda.
+
+  ReviewerLambdaMemory:
+    Type: Number
+    Default: 256
+    Description: Memory (MB) for the reviewer Lambda.
+
+  ReviewerLambdaTimeout:
+    Type: Number
+    Default: 60
+    Description: Timeout (seconds) for the reviewer Lambda.
+
+  BatchEvalLambdaMemory:
+    Type: Number
+    Default: 1024
+    Description: Memory (MB) for the batch evaluation Lambda.
+
+  BatchEvalLambdaTimeout:
+    Type: Number
+    Default: 900
+    Description: Timeout (seconds) for the batch evaluation Lambda.
+
+  BatchScheduleExpression:
+    Type: String
+    Default: rate(24 hours)
+    Description: EventBridge schedule expression for periodic batch evaluation.
+
+  SubscriberEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address to subscribe to reviewer notifications.
+
+  LogBucketName:
+    Type: String
+    Description: >-
+      Name for the S3 server-access-log bucket. Must be a globally unique
+      S3 bucket name that you own. This bucket receives access logs for
+      the data, review, and log buckets. Names starting with 'amzn-s3-demo-'
+      are reserved by AWS and cannot be created; choose a name specific to
+      your organization or project.
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    ConstraintDescription: >-
+      Must be a valid S3 bucket name: 3-63 lowercase alphanumeric characters,
+      dots, or hyphens; must start and end with a letter or digit.
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  HasSubscriberEmail: !Not [!Equals [!Ref SubscriberEmail, ""]]
+  IsUsEast1: !Equals [!Ref "AWS::Region", "us-east-1"]
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # -------------------------------------------------------------------------
+  # S3 Buckets
+  # -------------------------------------------------------------------------
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Name comes from a stack parameter (LogBucketName), not a static
+      # string in the template. The parameter value is known before
+      # resource creation, so self-logging works without a cycle and no
+      # static bucket-name prefix is embedded in the template.
+      BucketName: !Ref LogBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucketName
+        LogFilePrefix: self-access-logs/
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3ServerAccessLogsDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${LogBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn:
+                  - !GetAtt DataBucket.Arn
+                  - !GetAtt HumanReviewBucket.Arn
+                  - !GetAtt LogBucket.Arn
+          - Sid: DenyNonSSLRequests
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt LogBucket.Arn
+              - !Sub "${LogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    # No explicit DependsOn on LogBucketPolicy: that would form a cycle with
+    # LogBucketPolicy's ArnLike (!GetAtt DataBucket.Arn). CloudFormation creates
+    # both roughly in parallel; access-log delivery is eventually consistent
+    # (S3 batches server access logs before delivery), so a brief window
+    # before the policy is in place has no observable effect.
+    Properties:
+      # BucketName intentionally omitted: CloudFormation auto-generates a
+      # globally-unique name (e.g. llm-uncertainty-monitoring-databucket-abc123).
+      # Scripts read the actual name from stack outputs via deploy_model.py,
+      # which seeds it into the DynamoDB config table.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: data-access-logs/
+
+  HumanReviewBucket:
+    Type: AWS::S3::Bucket
+    # See note on DataBucket above regarding the intentional absence of
+    # DependsOn: LogBucketPolicy (would form a cycle).
+    Properties:
+      # BucketName intentionally omitted (same rationale as DataBucket).
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: review-access-logs/
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSLRequests
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub "${DataBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  HumanReviewBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HumanReviewBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSLRequests
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt HumanReviewBucket.Arn
+              - !Sub "${HumanReviewBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # -------------------------------------------------------------------------
+  # KMS key for DynamoDB config table (customer-managed CMK)
+  # -------------------------------------------------------------------------
+  ConfigTableKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "Customer-managed CMK for encrypting the LLMUncertaintyConfig DynamoDB table."
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+
+  ConfigTableKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${Prefix}-ConfigTable"
+      TargetKeyId: !Ref ConfigTableKMSKey
+
+  # -------------------------------------------------------------------------
+  # DynamoDB Config Table
+  # -------------------------------------------------------------------------
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref ConfigTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref ConfigTableKMSKey
+
+  # -------------------------------------------------------------------------
+  # SQS Queue (Human Review)
+  # -------------------------------------------------------------------------
+  HumanReviewQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Prefix}-HumanReview"
+      VisibilityTimeout: 120
+      KmsMasterKeyId: alias/aws/sqs
+      KmsDataKeyReusePeriodSeconds: 300
+
+  # -------------------------------------------------------------------------
+  # SNS Topic (Reviewer Notifications)
+  # -------------------------------------------------------------------------
+  ReviewerSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Prefix}-ReviewerNotifications"
+      KmsMasterKeyId: alias/aws/sns
+
+  ReviewerEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasSubscriberEmail
+    Properties:
+      TopicArn: !Ref ReviewerSNSTopic
+      Protocol: email
+      Endpoint: !Ref SubscriberEmail
+
+  # -------------------------------------------------------------------------
+  # IAM Roles
+  # -------------------------------------------------------------------------
+  InferenceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-InferenceLambdaRole"
+      Description: "Inference Lambda: invoke endpoint, read config, send SQS, publish metrics."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InferenceLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeSageMakerEndpoint
+                Effect: Allow
+                Action: sagemaker:InvokeEndpoint
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/*"
+              - Sid: ReadDynamoDBConfig
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt ConfigTable.Arn
+              - Sid: DecryptConfigTableCMK
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ConfigTableKMSKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+              - Sid: SendToSQS
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt HumanReviewQueue.Arn
+              - Sid: EncryptSQSManagedKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "sqs.${AWS::Region}.amazonaws.com"
+              - Sid: PublishMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref CloudWatchNamespace
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  ReviewerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-ReviewerLambdaRole"
+      Description: "Reviewer Lambda: archive to S3, publish SNS, receive SQS."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReviewerLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArchiveToS3
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${HumanReviewBucket.Arn}/human_review/*"
+              - Sid: PublishSNS
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ReviewerSNSTopic
+              - Sid: DecryptSNSAndSQSManagedKeys
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      - !Sub "sns.${AWS::Region}.amazonaws.com"
+                      - !Sub "sqs.${AWS::Region}.amazonaws.com"
+              - Sid: ReceiveSQS
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt HumanReviewQueue.Arn
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  BatchEvalLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-BatchEvalLambdaRole"
+      Description: "Batch evaluation Lambda: invoke Lambda, S3, DynamoDB, CloudWatch."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BatchEvalLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-uncertainty-*"
+              - Sid: S3ReadWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+              - Sid: ReadDynamoDBConfig
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt ConfigTable.Arn
+              - Sid: DecryptConfigTableCMK
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ConfigTableKMSKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+              - Sid: PublishMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref CloudWatchNamespace
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: InvokeSageMakerEndpoint
+                Effect: Allow
+                Action: sagemaker:InvokeEndpoint
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/*"
+
+  # -------------------------------------------------------------------------
+  # Lambda Functions
+  # -------------------------------------------------------------------------
+  InferenceLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: llm-uncertainty-inference
+      Description: "Per-request conformal prediction set construction and uncertainty routing."
+      Role: !GetAtt InferenceLambdaRole.Arn
+      Handler: llm_uncertainty_monitoring.inference_handler.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      MemorySize: !Ref InferenceLambdaMemory
+      Timeout: !Ref InferenceLambdaTimeout
+      Environment:
+        Variables:
+          CONFIG_ID: default
+          CONFIG_TABLE: !Ref ConfigTableName
+          HUMAN_REVIEW_DESTINATION_ARN: !GetAtt HumanReviewQueue.Arn
+          HUMAN_REVIEW_DESTINATION_TYPE: sqs
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+
+  ReviewerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: llm-uncertainty-reviewer
+      Description: "Archives uncertain predictions to S3 and notifies reviewers via SNS."
+      Role: !GetAtt ReviewerLambdaRole.Arn
+      Handler: llm_uncertainty_monitoring.reviewer_handler.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      MemorySize: !Ref ReviewerLambdaMemory
+      Timeout: !Ref ReviewerLambdaTimeout
+      Environment:
+        Variables:
+          HUMAN_REVIEW_BUCKET: !Ref HumanReviewBucket
+          SNS_TOPIC_ARN: !Ref ReviewerSNSTopic
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+
+  BatchEvalLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: llm-uncertainty-batch-eval
+      Description: "Periodic batch evaluation: replays labeled data through inference."
+      Role: !GetAtt BatchEvalLambdaRole.Arn
+      Handler: scripts.run_batch_evaluation.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      MemorySize: !Ref BatchEvalLambdaMemory
+      Timeout: !Ref BatchEvalLambdaTimeout
+      Environment:
+        Variables:
+          CONFIG_ID: default
+          CONFIG_TABLE: !Ref ConfigTableName
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+
+  # -------------------------------------------------------------------------
+  # SQS → Reviewer Lambda Event Source Mapping
+  # -------------------------------------------------------------------------
+  ReviewerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt HumanReviewQueue.Arn
+      FunctionName: !Ref ReviewerLambda
+      BatchSize: 1
+      Enabled: true
+
+  # -------------------------------------------------------------------------
+  # CloudWatch Alarm (SetSize drift)
+  # -------------------------------------------------------------------------
+  SetSizeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-SetSize-High"
+      AlarmDescription: "Average prediction set size exceeds threshold — model uncertainty rising."
+      Namespace: !Ref CloudWatchNamespace
+      MetricName: SetSize
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2.0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions: []
+      AlarmActions:
+        - !Ref ReviewerSNSTopic
+      OKActions:
+        - !Ref ReviewerSNSTopic
+      TreatMissingData: notBreaching
+
+  # -------------------------------------------------------------------------
+  # EventBridge Schedule (Periodic Batch Evaluation)
+  # -------------------------------------------------------------------------
+  BatchEvalSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${Prefix}-BatchEvalSchedule"
+      Description: "Triggers periodic batch evaluation of the LLM against labeled holdouts."
+      ScheduleExpression: !Ref BatchScheduleExpression
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt BatchEvalLambda.Arn
+        RoleArn: !GetAtt BatchEvalLambdaRole.Arn
+        Input: !Sub |
+          {
+            "input_s3_uri": "s3://${DataBucket}/data/test.jsonl",
+            "difficult_s3_uri": "s3://${DataBucket}/data/difficult.jsonl",
+            "config_id": "default",
+            "config_table": "${ConfigTableName}",
+            "s3_output_bucket": "${DataBucket}",
+            "s3_output_prefix": "batch"
+          }
+
+  # Permission for EventBridge to invoke the batch eval Lambda
+  BatchEvalSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BatchEvalLambda
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt BatchEvalSchedule.Arn
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  DataBucketName:
+    Description: S3 bucket for calibration/test data and batch results.
+    Value: !Ref DataBucket
+
+  HumanReviewBucketName:
+    Description: S3 bucket for archived uncertain predictions.
+    Value: !Ref HumanReviewBucket
+
+  LogBucketName:
+    Description: S3 bucket for server access logs.
+    Value: !Ref LogBucket
+
+  ConfigTableName:
+    Description: DynamoDB table storing pipeline configuration (q_hat, endpoint, routing).
+    Value: !Ref ConfigTable
+
+  HumanReviewQueueArn:
+    Description: SQS queue ARN for uncertain prediction routing.
+    Value: !GetAtt HumanReviewQueue.Arn
+
+  HumanReviewQueueUrl:
+    Description: SQS queue URL.
+    Value: !Ref HumanReviewQueue
+
+  ReviewerTopicArn:
+    Description: SNS topic ARN for reviewer notifications.
+    Value: !Ref ReviewerSNSTopic
+
+  InferenceLambdaArn:
+    Description: Inference Lambda function ARN.
+    Value: !GetAtt InferenceLambda.Arn
+
+  ReviewerLambdaArn:
+    Description: Reviewer Lambda function ARN.
+    Value: !GetAtt ReviewerLambda.Arn
+
+  BatchEvalLambdaArn:
+    Description: Batch evaluation Lambda function ARN.
+    Value: !GetAtt BatchEvalLambda.Arn
+
+  InferenceLambdaRoleArn:
+    Description: IAM role ARN for the inference Lambda.
+    Value: !GetAtt InferenceLambdaRole.Arn
+
+  ReviewerLambdaRoleArn:
+    Description: IAM role ARN for the reviewer Lambda.
+    Value: !GetAtt ReviewerLambdaRole.Arn
+
+  BatchEvalLambdaRoleArn:
+    Description: IAM role ARN for the batch evaluation Lambda.
+    Value: !GetAtt BatchEvalLambdaRole.Arn

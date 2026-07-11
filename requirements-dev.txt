@@ -1,0 +1,15 @@
+# Dev / test dependencies.
+-r requirements.txt
+pytest==8.3.3
+pytest-cov==5.0.0
+hypothesis==6.112.0
+ruff==0.6.9
+black==24.10.0
+mypy==1.11.2
+pre-commit==3.8.0
+pip-tools==7.5.0
+
+# Data-quality (PyDeequ-based) — dev/CI/notebook only; not imported by
+# runtime Lambdas. PySpark pulls in a JVM and is heavy (~300 MB).
+pydeequ==1.4.0
+pyspark==3.5.3
