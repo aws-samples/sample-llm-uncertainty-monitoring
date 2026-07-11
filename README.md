@@ -511,7 +511,7 @@ modules — the library can be `import`-ed by Lambdas, notebooks, and tests with
 
 ## Status
 
-Work in progress.
+This is sample code for the AWS blog post on monitoring LLM uncertainty in Financial Services.
 
 ## Interactive demo
 
