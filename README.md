@@ -495,7 +495,6 @@ llm_uncertainty_monitoring_system/
 ├── examples/demo.ipynb                  # end-to-end SageMaker Studio walkthrough
 ├── template.yaml                        # CloudFormation stack (IAM, DynamoDB, S3, Lambda, SQS, SNS, EventBridge)
 ├── docs/                                # architecture.md, production-upgrades.md
-├── blog/                                # blog/post.md (aws-samples publication)
 ├── requirements.txt                     # runtime (boto3, sagemaker, datasets, numpy, scipy, …)
 ├── requirements-dev.txt                 # +pytest, mypy, ruff, black, pydeequ, pyspark, …
 ├── requirements-lambda.txt              # minimal Lambda deps (numpy, scipy); boto3 excluded (in runtime)
