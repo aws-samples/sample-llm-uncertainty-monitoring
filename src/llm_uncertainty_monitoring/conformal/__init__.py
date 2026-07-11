@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -47,7 +47,7 @@ to one. Calibrated against the softmax precision of the prefill scoring
 pipeline (Req 5.2)."""
 
 
-def _validate_probability_vector(p: ProbabilityVector) -> np.ndarray:
+def _validate_probability_vector(p: ProbabilityVector) -> "np.ndarray[Any, Any]":
     """Validate ``p`` and return it as a 1-D ``np.ndarray``.
 
     Raises ``ValueError`` (with the offending sum or shape) if ``p`` is
