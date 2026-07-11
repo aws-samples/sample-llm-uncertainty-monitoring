@@ -511,7 +511,7 @@ modules — the library can be `import`-ed by Lambdas, notebooks, and tests with
 
 ## Status
 
-This is sample code for the AWS blog post on monitoring LLM uncertainty in Financial Services.
+Work in progress.
 
 ## Interactive demo
 
@@ -755,8 +755,17 @@ that grants only the actions needed by this pipeline, scoped to the specific res
 aws sagemaker delete-endpoint --endpoint-name <ENDPOINT_NAME> --region "${REGION}"
 
 # 2. Empty S3 buckets (CloudFormation cannot delete non-empty buckets).
-#    The data and review buckets have versioning enabled, so both current
-#    objects AND all object versions/delete markers must be removed.
+#    Buckets have versioning enabled, so both current objects AND all
+#    object versions/delete markers must be removed.
+#
+#    Order matters: empty the data and review buckets FIRST (they generate
+#    server access logs that land in the log bucket asynchronously), then
+#    wait for log delivery to settle, then empty the log bucket LAST.
+#    Without this order the log bucket can re-populate after emptying and
+#    the stack delete will fail with "The bucket you tried to delete is
+#    not empty." If that happens, re-empty the log bucket and retry
+#    `aws cloudformation delete-stack`, or as a fallback run
+#    `aws s3 rb "s3://${LOG_BUCKET}" --force` before retrying.
 empty_versioned_bucket() {
   local bucket="$1"
   # Delete all object versions
@@ -781,6 +790,11 @@ empty_versioned_bucket() {
 
 empty_versioned_bucket "${DATA_BUCKET}"
 empty_versioned_bucket "${REVIEW_BUCKET}"
+
+# Wait ~60s so any in-flight S3 server access logs land in the log bucket
+# before we empty it (otherwise the log bucket will re-populate).
+sleep 60
+
 empty_versioned_bucket "${LOG_BUCKET}"
 
 # 3. Delete the CloudFormation stack (removes IAM, DynamoDB, Lambda, SQS, SNS, EventBridge, S3 buckets, alarm)
