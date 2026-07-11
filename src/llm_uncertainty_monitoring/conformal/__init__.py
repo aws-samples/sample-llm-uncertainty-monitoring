@@ -47,7 +47,7 @@ to one. Calibrated against the softmax precision of the prefill scoring
 pipeline (Req 5.2)."""
 
 
-def _validate_probability_vector(p: ProbabilityVector) -> "np.ndarray[Any, Any]":
+def _validate_probability_vector(p: ProbabilityVector) -> np.ndarray[Any, Any]:
     """Validate ``p`` and return it as a 1-D ``np.ndarray``.
 
     Raises ``ValueError`` (with the offending sum or shape) if ``p`` is
