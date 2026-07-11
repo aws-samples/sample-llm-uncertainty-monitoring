@@ -78,15 +78,13 @@ extend-exclude = "/(\\.venv|build|dist|examples|blog|\\.kiro)/"
 # runtime issues would still be caught.
 python_version = "3.12"
 files = ["src"]
-# Third-party libraries that don't ship type stubs: boto3, botocore, datasets,
-# scipy.special, wordcloud. Their runtime integration is validated by the
-# unit test suite.
-ignore_missing_imports = true
 # Strict mode is intentionally not enabled: the codebase relies heavily on
 # numpy 2.x, whose stubs use PEP 695 syntax that mypy 1.11 partially supports.
 # The test matrix in .github/workflows/ci.yml exercises the code on 3.10-3.12
 # and provides the real correctness signal; mypy runs as a lightweight linter
-# for obvious type mistakes.
+# for obvious type mistakes. Third-party libraries without type stubs
+# (boto3, botocore, datasets, scipy.special, wordcloud) are ignored via
+# ignore_missing_imports below.
 warn_unused_ignores = true
 warn_redundant_casts = true
 ignore_missing_imports = true
