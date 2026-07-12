@@ -12,6 +12,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # Hard cap to prevent 6-hour hangs on GitHub-hosted runner cleanup steps.
+    # Real work (install + lint + pytest across 3 versions) completes in ~2 min.
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
@@ -21,10 +24,12 @@ jobs:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
       # actions/setup-python v5.1.1
+      # cache: pip intentionally omitted — its Post Run cache-save step
+      # frequently hangs on GitHub-hosted runners for this repo, blocking
+      # the whole job for hours. Installs are fast enough without caching.
       - uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
       - name: Install dependencies
         run: |
