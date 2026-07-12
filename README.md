@@ -87,81 +87,9 @@ The accuracy gap between certain and uncertain predictions validates the routing
 demonstration, certain predictions achieve 91–94% accuracy while uncertain predictions drop to 41–60%,
 confirming that routing uncertain predictions to human review is well-justified.
 
-```mermaid
-%%{init: {'themeVariables': {'fontSize': '20px'}}}%%
-flowchart TB
-    subgraph Top[" "]
-        direction LR
-        subgraph Calibrate["Offline calibration"]
-            direction TB
-            DS[(S3<br/>cal.jsonl)]
-            DQ[PyDeequ<br/>data quality check]
-            RT[run_calibration.py]
-            SCRIPT[Compute LAC scores + q_hat]
-            DIAG[(S3<br/>diagnostics.json)]
-            DS --> DQ
-            DQ --> RT
-            RT --> SCRIPT
-            SCRIPT --> DIAG
-        end
+[![Architecture diagram: three phases (offline calibration, online inference, periodic labeled replay) connected via DynamoDB config, CloudWatch metrics, S3 storage, and a shared SageMaker AI JumpStart endpoint. Uncertain predictions are routed to SQS, archived to S3, and notified via SNS.](docs/llm_uncertainty_monitoring.png)](docs/llm_uncertainty_monitoring.png)
 
-        subgraph Online["Online inference"]
-            direction TB
-            USER([User<br/>question + choices])
-            LAM[Inference Lambda<br/>build prediction set]
-            CONF([Confident:<br/>single label returned])
-            SQS[/Human_Review_Queue<br/>SQS/]
-            REV[Reviewer Lambda]
-            SNS[/SNS topic<br/>email or Slack/]
-            HR[(S3 human-review archive<br/>human_review/pending/)]
-            USER --> LAM
-            LAM -->|set_size = 1| CONF
-            LAM -->|set_size > 1| SQS
-            SQS --> REV
-            REV --> HR
-            REV --> SNS
-        end
-    end
-
-    EP[/SageMaker AI Endpoint<br/>Llama 3 8B · K prefill calls/]
-
-    RT -->|score cal set| EP
-    LAM <-->|per-request probs| EP
-
-    DDB[(DynamoDB Config<br/>q_hat, endpoint,<br/>routing destination)]
-    CW[(CloudWatch<br/>SetSize, Coverage,<br/>CertainAccuracy,<br/>UncertainAccuracy)]
-
-    subgraph Batch["Periodic labeled replay"]
-        direction LR
-        EB[EventBridge Scheduler]
-        BATCH[Batch evaluation Lambda]
-        S3[(S3<br/>data, batch JSON)]
-        XAI[Uncertainty word cloud<br/>on-demand script]
-        EB --> BATCH
-        BATCH --> S3
-        S3 --> XAI
-    end
-
-    SCRIPT -->|write q_hat| DDB
-    DDB -.->|q_hat, config| LAM
-    LAM -->|raw SetSize per request| CW
-    BATCH -->|replay test.jsonl| LAM
-    BATCH -->|aggregate metrics| CW
-
-    style EP fill:#ffe4b5
-    style DDB fill:#e0f2fe
-    style CW fill:#fef3c7
-    style SQS fill:#fce7f3
-    style REV fill:#fce7f3
-    style SNS fill:#fce7f3
-    style HR fill:#dcfce7
-    style S3 fill:#dcfce7
-    style DS fill:#dcfce7
-    style DIAG fill:#dcfce7
-    style SCRIPT fill:#e0f2fe
-    style DQ fill:#f5f5dc
-    style Top fill:#ffffff,stroke-width:0px
-```
+_Click the diagram to view it full size._
 
 ## Components
 
