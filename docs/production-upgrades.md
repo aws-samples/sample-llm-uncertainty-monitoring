@@ -22,16 +22,6 @@ Replace the SNS notification flow with a web UI:
 
 This closes the feedback loop: reviewer labels flow back into the calibration set for periodic recalibration.
 
-## Amazon Augmented AI (A2I)
-
-Alternative to the custom dashboard:
-
-- Replace the Reviewer Lambda's SQS → SNS path with `start_human_loop()`
-- A2I provides: managed worker UI, task assignment, timeout/retry, workforce management
-- Cognito workforce authenticates reviewers
-- Completed reviews write to S3 → ingest into feedback table
-- Switchable via `human_review_destination_type = "a2i"` in DynamoDB config
-
 ## DLQ and Idempotency
 
 - **Dead Letter Queue**: Add a DLQ to the SQS Human Review Queue (`maxReceiveCount = 3`). Failed messages go to the DLQ for manual inspection.

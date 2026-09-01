@@ -101,7 +101,7 @@ _Click the diagram to view it full size._
 | Batch evaluation Lambda | AWS Lambda triggered by EventBridge | Periodically replays the labeled holdout through the inference Lambda, computes labeled aggregates (`Coverage`, `Top1Correct`, `AveragePredictionSetSize`, `CertainAccuracy`, `UncertainAccuracy`), writes batch JSON to S3. |
 | Config + state | **DynamoDB** `LLMUncertaintyConfig` table | Single item (partition key `config_id="default"`) holds `q_hat`, `endpoint_name`, `target_coverage`, `cloudwatch_namespace`, `human_review_destination_arn`, etc. Cold-start-cached by the Lambdas. |
 | Storage + dashboards | S3 + CloudWatch | Data splits, calibration diagnostics, batch JSON, all per-request and aggregated metrics. |
-| Human review | SQS + Reviewer Lambda + SNS + S3 archive | Uncertain predictions queue up in SQS; a small Reviewer Lambda archives the full payload to `s3://.../human_review/pending/{run_id}-{message_id}.json` and notifies a reviewer via an SNS topic (email or Slack). A **Cognito-authenticated reviewer dashboard** and **Amazon Augmented AI (A2I)** are documented as production upgrades. |
+| Human review | SQS + Reviewer Lambda + SNS + S3 archive | Uncertain predictions queue up in SQS; a small Reviewer Lambda archives the full payload to `s3://.../human_review/pending/{run_id}-{message_id}.json` and notifies a reviewer via an SNS topic (email or Slack). A **Cognito-authenticated reviewer dashboard** is documented as a production upgrade. |
 | Data quality | **PyDeequ** (offline) | Declarative checks on `cal.jsonl` and `test.jsonl` (non-empty, complete required columns, `answer ∈ [0, K)`, unique `index`) gate the calibration step. |
 | Uncertainty XAI | On-demand Python script | Consumes batch JSON from S3 to render word clouds: single uncertain-tail cloud, or side-by-side certain vs. uncertain comparison with top-N term lists. No scheduler. |
 
@@ -266,10 +266,9 @@ A small **Reviewer Lambda** drains the queue (`MessageBatchSize = 1`) and, for e
 
 Why both? SNS is the human-facing notification — fast, push-based — but messages aren't durable beyond the subscription. The S3 archive is the durable record: every uncertain payload, with its full probability vector and prediction set, lives there for audit and downstream retraining.
 
-The reviewer destination is stored in DynamoDB (`human_review_destination_arn`), so the routing path can be re-pointed without a Lambda redeploy. Two production upgrades are documented in `docs/production-upgrades.md`:
+The reviewer destination is stored in DynamoDB (`human_review_destination_arn`), so the routing path can be re-pointed without a Lambda redeploy. A production upgrade is documented in `docs/production-upgrades.md`:
 
 - **Cognito-authenticated reviewer dashboard** — a small Amplify SPA where reviewers browse pending payloads, click the correct answer, and the result lands in a feedback table for retraining.
-- **Amazon Augmented AI (A2I)** — replace the Reviewer Lambda + SNS with an A2I FlowDefinition. A2I provides a managed worker UI, task lifecycle, and workforce management; the inference Lambda's only change is one branch in `_route_to_human_review` that calls `start_human_loop` instead of `send_message`. Switchable via `human_review_destination_type`.
 
 ## Uncertainty explainability (XAI)
 
@@ -325,7 +324,7 @@ MMLU). No token generation is needed — only the log-probability of the appende
 
 On an `ml.g5.2xlarge` endpoint with Llama 3 8B:
 - **Latency**: ~250ms per question (4 sequential prefill calls)
-- **Cost**: ~$1.50/hour for the endpoint (same as standard inference)
+- **Cost**: the same as standard real-time inference on the endpoint — see [Amazon SageMaker pricing](https://aws.amazon.com/sagemaker/pricing/)
 - **Overhead**: The conformal logic (set construction, metrics publishing) adds <1ms
 
 The marginal cost is minimal compared to the value of knowing when your model is unreliable. In regulated
@@ -380,8 +379,8 @@ To operationalize this pipeline for your own classification task:
    ```
 
 5. **Connect human review.** The pipeline routes uncertain predictions to SQS by default. Subscribe
-   your review team via SNS (email/Slack), or integrate with Amazon A2I for a managed reviewer UI
-   with task assignment and workforce management.
+   your review team via SNS (email/Slack), or build a reviewer dashboard as described in
+   `docs/production-upgrades.md`.
 
 ## Tested with
 
