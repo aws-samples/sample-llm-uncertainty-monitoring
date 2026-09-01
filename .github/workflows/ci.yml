@@ -9,6 +9,12 @@ on:
   push:
     branches: [main]
 
+# Least-privilege token: this workflow only reads the repo (checkout) and runs
+# lint/tests — it needs no write scopes. Explicit permissions satisfy the
+# CodeQL "workflow does not contain permissions" hardening check.
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
