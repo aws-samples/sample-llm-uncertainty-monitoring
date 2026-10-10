@@ -71,7 +71,7 @@ coverage==7.14.0
     # via pytest-cov
 cycler==0.12.1
     # via matplotlib
-datasets==3.6.0
+datasets==5.0.1
     # via -r requirements.txt
 dill==0.3.8
     # via
