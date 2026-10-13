@@ -12,4 +12,4 @@ pip-tools==7.5.0
 # Data-quality (PyDeequ-based) — dev/CI/notebook only; not imported by
 # runtime Lambdas. PySpark pulls in a JVM and is heavy (~300 MB).
 pydeequ==1.4.0
-pyspark==3.5.3
+pyspark==3.5.8
